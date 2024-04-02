@@ -1,6 +1,6 @@
-import os
 import cv2
 import random
+import re
 
 class Episode:
     def __init__(self, title, url):
@@ -21,6 +21,31 @@ class Season:
         for episode in self.episodes:
             returnstr += episode.__str__()
         return returnstr
+
+def seed_db(episodes_path, cursor):
+    cursor.execute("CREATE TABLE episode(number INTEGER PRIMARY KEY, title, season, url, episode_number)")
+    cursor.execute("CREATE TABLE frame(id INTEGER PRIMARY KEY, number, episode_id, view_count)")
+    seasons = load_all_from_file(episodes_path)
+    season_index = 1
+    episode_index = 0
+    episode_index2 = 0
+    for season in seasons:
+        for episode in season.episodes: 
+            episode_name = re.search(r'^\d+\.\s*(.*)', episode.title)
+            episode_number = re.search(r'^(\d+)', episode.title)
+            if episode_name is None or episode_number is None:
+                print("Episode name or episode number found to be None, skipping")
+                continue
+            cursor.execute("INSERT into episode VALUES (?, ?, ?, ?, ?)", (episode_index, episode_name.group(1), season_index, episode.url, episode_number.group(1)))
+            episode_index +=1
+        for episode in season.episodes:
+            vidcap = cv2.VideoCapture(episode.url) 
+            total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
+            for i in range(0,total_frames):
+                cursor.execute("INSERT into frame (number, episode_id, view_count) VALUES (?, ?, ?)", (i, episode_index2, 0))
+            episode_index2 +=1
+        season_index +=1 
+
 def load_all_from_file(file_name):
     f = open(file_name, "r")
     lines = f.readlines()
@@ -44,27 +69,32 @@ def load_all_from_file(file_name):
             continue
     return structure
 
-def kiepski_random_frame(file_name):
-    structure = load_all_from_file(file_name)
-    random_season = structure[random.randint(0,len(structure)-1)]
-    episode = random_season.episodes[random.randint(0, len(random_season.episodes)-1)]
-    file_name = episode.title
-    
-    vidcap = cv2.VideoCapture(episode.url)
-    total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
+def get_random_frame(cursor):
+    cursor.execute("SELECT * FROM episode ORDER BY RANDOM() LIMIT 1") 
+    episode = cursor.fetchone()
+    cursor.execute("SELECT * FROM frame WHERE episode_id = ?", (episode[0],))
+    episode_frames = cursor.fetchall()
+    random_frame, frame_index = get_episode_random_frame(episode[3], len(episode_frames)-1)
+    episode_views = episode_frames[frame_index][3] + 1
+    cursor.execute("UPDATE frame SET view_count=? WHERE id=?", (episode_views, episode_frames[frame_index][0])) 
+    return (random_frame, episode, frame_index)
+
+def get_episode_random_frame(url,frame_count ):
+    vidcap = cv2.VideoCapture(url)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
-    video_length_seconds = total_frames/fps
+    start = 95*fps # capture from second 95
+    stop = 50*fps # capture to before last n seconds
+    random_frame_index = calculate_random_frame(frame_count, start, stop)
+    return (get_frame(vidcap, random_frame_index),random_frame_index)
 
-    start = 95 # capture from second 95
-    stop = 50 # capture to before last n seconds
+def calculate_random_frame(frame_count, start, stop):
+    first_frame = int(start)
+    last_frame = int(frame_count-stop)
+    return random.randint(first_frame, last_frame)
 
-    first_frame = int(start*fps)
-    last_frame = int((video_length_seconds-stop)*fps)
-
-    random_frame = random.randint(first_frame, last_frame)
-    time_of_frame = random_frame/fps
-    vidcap.set(cv2.CAP_PROP_POS_FRAMES, random_frame)
-    _, frame = vidcap.read()
+def get_frame(episode_vidcap, frame_number):
+    episode_vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    _, frame = episode_vidcap.read()
     _, frame_bytes = cv2.imencode('.jpg', frame)
-    return (frame_bytes, file_name)
+    return frame_bytes
 
